@@ -35,6 +35,9 @@
 // Generated from server-decoration.xml
 #include "video/out/wayland/srv-decor.h"
 
+// Generated from linux-dmabuf-unstable-v1.xml
+#include "video/out/wayland/linux-dmabuf-v1.h"
+
 static void xdg_shell_ping(void *data, struct zxdg_shell_v6 *shell, uint32_t serial)
 {
     zxdg_shell_v6_pong(shell, serial);

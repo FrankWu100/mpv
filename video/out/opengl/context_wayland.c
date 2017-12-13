@@ -20,6 +20,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
+#include "libmpv/opengl_cb.h"
 #include "video/out/wayland_common.h"
 #include "context.h"
 #include "egl_helpers.h"
@@ -32,6 +33,7 @@ struct priv {
     EGLSurface egl_surface;
     EGLConfig  egl_config;
     struct wl_egl_window *egl_window;
+    struct mpv_opengl_cb_wayland_params wayland_params;
 };
 
 static void resize(struct ra_ctx *ctx)
@@ -76,10 +78,14 @@ static bool egl_create_context(struct ra_ctx *ctx)
 
     mpegl_load_functions(&p->gl, wl->log);
 
+    p->wayland_params.compositor = wl->compositor;
+    p->wayland_params.display = wl->display;
+    p->wayland_params.surface = wl->surface;
+
     struct ra_gl_ctx_params params = {
         .swap_buffers = wayland_egl_swap_buffers,
-        .native_display_type = "wl",
-        .native_display = wl->display,
+        .native_display_type = "opengl-cb-wayland-params",
+        .native_display = &p->wayland_params,
     };
 
     if (!ra_gl_ctx_init(ctx, &p->gl, params))

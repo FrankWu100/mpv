@@ -183,8 +183,16 @@ struct mpv_opengl_cb_window_pos {
  * glMPGetNativeDisplay("x11") should return a X11 "Display*", which then will
  * be used to create the hardware decoder state.
  *
- * glMPGetNativeDisplay("wl") should return a Wayland "struct wl_display *".
- *
+ * glMPGetNativeDisplay("opengl-cb-wayland-params") should return a
+ * "struct mpv_opengl_cb_wayland_params *".
+ */
+struct mpv_opengl_cb_wayland_params {
+    struct wl_compositor *compositor;
+    struct wl_display *display;
+    struct wl_surface *surface;
+};
+
+/**
  * glMPGetNativeDisplay("opengl-cb-drm-params") should return an
  * mpv_opengl_cb_drm_params structure pointer :
  */
