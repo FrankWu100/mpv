@@ -39,6 +39,41 @@
 
 extern const struct m_sub_options drm_conf;
 
+// The HDR structs and enumerations didn't make it to mainline yet.
+// those can be removed once support has landed
+enum mp_supported_eotf_type {
+        MP_TRADITIONAL_GAMMA_SDR = 0,
+        MP_TRADITIONAL_GAMMA_HDR,
+        MP_SMPTE_ST2084,
+        MP_HLG,
+        MP_FUTURE_EOTF
+};
+
+enum mp_drm_hdmi_output_type {
+    MP_DRM_HDMI_OUTPUT_DEFAULT_RGB, /* default RGB */
+    MP_DRM_HDMI_OUTPUT_YCBCR444, /* YCBCR 444 */
+    MP_DRM_HDMI_OUTPUT_YCBCR422, /* YCBCR 422 */
+    MP_DRM_HDMI_OUTPUT_YCBCR420, /* YCBCR 420 */
+    MP_DRM_HDMI_OUTPUT_YCBCR_HQ, /* Highest subsampled YUV */
+    MP_DRM_HDMI_OUTPUT_YCBCR_LQ, /* Lowest subsampled YUV */
+    MP_DRM_HDMI_OUTPUT_INVALID, /* Guess what ? */
+};
+
+/* HDR Metadata */
+struct mp_hdr_static_metadata {
+        uint16_t eotf;
+        uint16_t type;
+        uint16_t display_primaries_x[3];
+        uint16_t display_primaries_y[3];
+        uint16_t white_point_x;
+        uint16_t white_point_y;
+        uint16_t max_mastering_display_luminance;
+        uint16_t min_mastering_display_luminance;
+        uint16_t max_fall;
+        uint16_t max_cll;
+        uint16_t min_cll;
+};
+
 struct drm_frame {
     struct drm_prime_framebuffer fb;
     struct mp_image *image; // associated mpv image
@@ -51,6 +86,13 @@ struct priv {
 
     struct drm_atomic_context *ctx;
     struct drm_frame current_frame, old_frame;
+
+    // Media HDR metadata
+    struct mp_hdr_static_metadata *hdr_metadata;
+    int hdr_blob_id;
+
+    // Panel HDR metadata
+    struct mp_hdr_static_metadata panel_metadata;
 
     struct mp_rect src, dst;
 
@@ -110,6 +152,41 @@ static void scale_dst_rect(struct ra_hwdec *hw, int source_w, int source_h ,stru
     dst->y1 += offset_y;
 }
 
+
+static struct mp_hdr_static_metadata *get_hdr_metadata(struct mp_image *mpi)
+{
+    struct mp_hdr_static_metadata *hdr;
+
+    if (!mpi)
+        return NULL;
+
+    hdr = talloc_zero(NULL, struct mp_hdr_static_metadata);
+
+    switch (mpi->params.color.gamma) {
+    case MP_CSP_TRC_PQ:
+        hdr->eotf = MP_SMPTE_ST2084;
+        break;
+    case MP_CSP_TRC_HLG:
+        hdr->eotf = MP_HLG;
+        break;
+    default:
+        hdr->eotf = MP_TRADITIONAL_GAMMA_SDR;
+        break;
+    }
+
+    struct mp_csp_primaries prims = mp_get_csp_primaries(mpi->params.color.primaries);
+    hdr->display_primaries_x[0] = (prims.red.x * 50000);
+    hdr->display_primaries_x[1] = (prims.green.x * 50000);
+    hdr->display_primaries_x[2] = (prims.blue.x * 50000);
+    hdr->display_primaries_y[0] = (prims.red.y * 50000);
+    hdr->display_primaries_y[1] = (prims.green.y * 50000);
+    hdr->display_primaries_y[2] = (prims.blue.y * 50000);
+    hdr->white_point_x = (prims.white.x * 50000);
+    hdr->white_point_y = (prims.white.y * 50000);
+
+    return hdr;
+}
+
 static int overlay_frame(struct ra_hwdec *hw, struct mp_image *hw_image,
                          struct mp_rect *src, struct mp_rect *dst, bool newframe)
 {
@@ -167,7 +244,33 @@ static int overlay_frame(struct ra_hwdec *hw, struct mp_image *hw_image,
                 drm_object_set_property(request,  p->ctx->overlay_plane, "CRTC_W",  dstw);
                 drm_object_set_property(request,  p->ctx->overlay_plane, "CRTC_H",  dsth);
                 drm_object_set_property(request,  p->ctx->overlay_plane, "ZPOS",    0);
-            } else {
+
+                if (!p->hdr_metadata) {
+                    p->hdr_metadata = get_hdr_metadata(hw_image);
+                    drmModeCreatePropertyBlob(drmparams->fd,  p->hdr_metadata, sizeof(* p->hdr_metadata), &p->hdr_blob_id);
+                    mp_verbose(p->log, "Video detected as %s\n", p->hdr_metadata->eotf ? "HDR" : "SDR");
+                }
+
+                if (p->hdr_metadata) {
+
+                    // send hdr to panel only if it supports hdr
+                    if (p->panel_metadata.eotf != 0) {
+                        drm_object_set_property(request,  p->ctx->connector, "HDR_SOURCE_METADATA", p->hdr_blob_id);
+                        drm_object_set_property(request,  p->ctx->overlay_plane, "EOTF", p->hdr_metadata->eotf);
+                    }
+                    else {
+                        drm_object_set_property(request,  p->ctx->overlay_plane, "EOTF",
+                                                p->hdr_metadata->eotf ? MP_TRADITIONAL_GAMMA_HDR : MP_TRADITIONAL_GAMMA_SDR);
+                    }
+
+                    drm_object_set_property(request,  p->ctx->connector, "HDMI_OUTPUT_FORMAT", MP_DRM_HDMI_OUTPUT_YCBCR_LQ);
+                }
+                else {
+                    drm_object_set_property(request,  p->ctx->overlay_plane, "EOTF", MP_TRADITIONAL_GAMMA_SDR);
+                }
+
+            }
+            else {
                 ret = drmModeSetPlane(p->ctx->fd, p->ctx->overlay_plane->id, p->ctx->crtc->id, next_frame.fb.fb_id, 0,
                                       MP_ALIGN_DOWN(p->dst.x0, 2), MP_ALIGN_DOWN(p->dst.y0, 2), dstw, dsth,
                                       p->src.x0 << 16, p->src.y0 << 16 , srcw << 16, srch << 16);
@@ -178,6 +281,17 @@ static int overlay_frame(struct ra_hwdec *hw, struct mp_image *hw_image,
                 }
             }
         }
+    }
+    else {
+        // End of playback, free playback specific data
+        if (p->hdr_metadata) {
+            talloc_free(p->hdr_metadata);
+            p->hdr_metadata = NULL;
+
+            drmModeDestroyPropertyBlob(p->ctx->fd, p->hdr_blob_id);
+            p->hdr_blob_id = 0;
+        }
+
     }
 
     set_current_frame(hw, &next_frame);
@@ -244,11 +358,19 @@ static int init(struct ra_hwdec *hw)
         drmModeFreeCrtc(crtc);
     }
 
-
     uint64_t has_prime;
     if (drmGetCap(p->ctx->fd, DRM_CAP_PRIME, &has_prime) < 0) {
         MP_ERR(hw, "Card does not support prime handles.\n");
         goto err;
+    }
+
+    drmModePropertyBlobPtr panel_metadata_prop;
+    panel_metadata_prop = drm_object_get_property_blob(p->ctx->connector, "HDR_PANEL_METADATA");
+    if (panel_metadata_prop) {
+        memcpy(&p->panel_metadata, panel_metadata_prop->data, panel_metadata_prop->length);
+        if (p->panel_metadata.eotf)
+            MP_VERBOSE(hw, "Panel supports HDR\n");
+        drmFree(panel_metadata_prop);
     }
 
     return 0;
