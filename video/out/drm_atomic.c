@@ -78,6 +78,17 @@ int drm_object_get_property(struct drm_object *object, char *name, uint64_t *val
    return -EINVAL;
 }
 
+drmModePropertyBlobPtr drm_object_get_property_blob(struct drm_object *object, char *name)
+{
+   uint64_t blob_id;
+
+   if (!drm_object_get_property(object, name, &blob_id)) {
+       return drmModeGetPropertyBlob(object->fd, blob_id);
+   }
+
+   return NULL;
+}
+
 int drm_object_set_property(drmModeAtomicReq *request, struct drm_object *object,
                             char *name, uint64_t value)
 {
@@ -98,6 +109,7 @@ struct drm_object * drm_object_create(struct mp_log *log, int fd,
     obj = talloc_zero(NULL, struct drm_object);
     obj->id = object_id;
     obj->type = type;
+    obj->fd = fd;
 
     if (drm_object_create_properties(log, fd, obj)) {
         talloc_free(obj);
@@ -169,6 +181,20 @@ struct drm_atomic_context *drm_atomic_create_context(struct mp_log *log, int fd,
         }
     }
 
+    for (int i = 0; i < res->count_connectors; i++) {
+        drmModeConnector *connector = drmModeGetConnector(fd, res->connectors[i]);
+        if (connector) {
+            if (connector->connection == DRM_MODE_CONNECTED &&
+            connector->count_modes > 0) {
+                ctx->connector =  drm_object_create(log, ctx->fd, connector->connector_id,
+                                                    DRM_MODE_OBJECT_CONNECTOR);
+            }
+            drmModeFreeConnector(connector);
+            if (ctx->connector)
+                break;
+        }
+    }
+
     for (unsigned int j = 0; j < plane_res->count_planes; j++) {
 
         drmplane = drmModeGetPlane (ctx->fd, plane_res->planes[j]);
@@ -216,6 +242,11 @@ struct drm_atomic_context *drm_atomic_create_context(struct mp_log *log, int fd,
         goto fail;
     }
 
+    if (!ctx->connector) {
+        mp_err(log, "Failed to find DRM atomic connector object\n");
+        goto fail;
+    }
+
     mp_verbose(log, "Found Primary plane with ID %d, overlay with ID %d\n",
                ctx->primary_plane->id, ctx->overlay_plane->id);
 
@@ -239,6 +270,7 @@ fail:
 void drm_atomic_destroy_context(struct drm_atomic_context *ctx)
 {
     drm_object_free(ctx->crtc);
+    drm_object_free(ctx->connector);
     drm_object_free(ctx->primary_plane);
     drm_object_free(ctx->overlay_plane);
     talloc_free(ctx);
